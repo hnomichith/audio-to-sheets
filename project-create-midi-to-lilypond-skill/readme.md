@@ -10,11 +10,23 @@ MIDI encodes music as raw timestamps and note events — it has no notion of bar
 
 This POC focuses on the mechanical conversion only — cleanup is handled in POC 04.
 
+## Success criteria
+
+The output must be **at least as clean as a direct MIDI import in MuseScore** — the baseline a musician would start from without any tooling. Concretely: the rendered PDF should be visually comparable to the MuseScore import with no obviously worse bar structure, voice layout, or enharmonic spelling. This can be verified by visual comparison of the two PDFs.
+
 ## Tools explored
 
-- [midi2ly](https://lilypond.org/doc/v2.24/Documentation/usage/invoking-midi2ly) — bundled with LilyPond, basic conversion
+- [midi2ly](https://lilypond.org/doc/v2.24/Documentation/usage/invoking-midi2ly) — bundled with LilyPond, basic conversion ❌ **Failed** (see below)
+- [musicxml2ly](https://lilypond.org/doc/v2.24/Documentation/usage/invoking-musicxml2ly) + MuseScore CLI export — route through MusicXML 🔲 To explore
+- [music21](https://web.mit.edu/music21/) — Python library with proper quantization and voice separation 🔲 To explore
 
-## How to reproduce
+## Approach 1 — midi2ly ❌ Failed
+
+### Verdict
+
+The `midi2ly` output, even after the best quantization settings and a full LLM cleanup pass (see `project-pokemon-piano/`), produces a score that is **worse than a direct MuseScore import**. The core problem is that `midi2ly` has no musical intelligence: it translates raw MIDI timestamps into LilyPond durations mechanically, with no understanding of bar structure, voice intent, or harmonic context. The issues it leaves — timing glitches, ghost voices, enharmonic misspellings, overlapping rests — cannot be fully resolved by downstream LLM cleanup because some are genuinely ambiguous without listening to the music.
+
+### How to reproduce
 
 ```bash
 # Raw conversion (no quantization)
@@ -64,17 +76,26 @@ All `midi2ly` flags were tested on the same MIDI to understand their effect:
 | `--allow-tuplet=4*2/3 --allow-tuplet=2*4/3` | Allow triplets: needed to avoid treating swung notes as fractional durations | ✅ Keep |
 | Additional tuplet flags (`8*2/3`, `4*4/3`, `16*2/3`) | No measurable effect on fractional count for this MIDI | ✗ No effect |
 
-### What still needs cleanup (→ POC 04)
+### Remaining issues after cleanup (from `project-pokemon-piano/`)
 
-- **Tempo spam** — conductor track emits a new `\tempo` every 16th note during ritardandos (15+ directives for a 150→144 BPM slowdown). A single `\tempo` at the start is enough.
-- **Sparse ghost voice** — `trackBchannelBvoiceC` is mostly multi-bar rests with two notes: `r2*11 f'4. g,8 r2*15 f'4. g,8`. At q16 it is clean enough to read, but the voice contributes nothing musically — drop it.
-- **Duplicate key/time signatures** — `\key c \major` appears twice. This comes from two events in the MIDI header; no flag suppresses it.
-- **One remaining bar check failure** at measure 4 in voice B — a small timing offset that no quantization level resolves. Likely a genuine MIDI glitch in the source file.
+After a full `plan-cleanup` + `execute-cleanup` LLM pass, the following could not be fully resolved:
 
-## Success criteria
+- **Barcheck failure at bar 20** — `<d g>1` (whole note) in a bar that already has 2 beats of content. Likely a held note transcription artefact; requires musical judgement to fix.
+- **Overlapping rests** — multi-voice layout forces colliding rests throughout; suppressing them is cosmetic, not a real fix.
+- **Enharmonic misspellings** — `ais` (A#) used instead of `bes` (Bb) in the F-major passage. Comes from raw MIDI pitch values with no key context.
+- **Structural bar errors unfixable without listening** — some timing offsets cannot be corrected by pattern-matching alone.
+
+### What worked
+
+- Quantization at `-d 16 -s 16` is the best `midi2ly` setting for this kind of MIDI
+- Mechanical cleanup (remove conductor track, fix `x*y` rest notation) is automatable
+- The LilyPond file compiles and the theme is recognizable — it is just not up to the quality bar
+
+### Results table
 
 | Criterion | Result |
 |---|---|
-| Compiles without errors (`lilypond file.ly`) | ✅ Warnings only |
-| Output renders a recognizable score | ✅ Theme is recognizable |
-| File size significantly smaller than MusicXML | ✅ 4 KB / 213 lines vs ~200 lines *per passage* in MusicXML |
+| Compiles without errors | ✅ Warnings only (3 remaining after cleanup) |
+| Theme recognizable | ✅ |
+| At least as clean as MuseScore import | ❌ Worse |
+| File size smaller than MusicXML | ✅ 4 KB / 213 lines |

@@ -1,23 +1,25 @@
 ---
 name: midi-to-lilypond
-description: Convert a MIDI file to a clean LilyPond score optimised for LLM input, and produce a companion metadata file describing the sheet and the cleanup work remaining. Asks targeted questions about the MIDI source to choose the best midi2ly parameters, runs the conversion, and writes a `.md` metadata file alongside the `.ly`. Use when the user has a MIDI file and wants a LilyPond score, or when converting audio-pipeline output (from basic-pitch / piano transcription) to sheet music notation.
+description: Convert a MIDI file to a clean LilyPond score optimised for LLM input, and complete or produce a companion metadata file describe how the sheet was produced. Asks targeted questions about the MIDI source to choose the best midi2ly parameters, runs the conversion, and writes a `.md` metadata file alongside the `.ly`. Use when the user has a MIDI file and wants a LilyPond score, or when converting audio-pipeline output (from basic-pitch / piano transcription) to sheet music notation.
 allowed-tools: Bash Read Write
 ---
 
 # MIDI to LilyPond Conversion
 
-Convert a MIDI file to a LilyPond `.ly` score with the cleanest possible output, and write a companion metadata file that describes the sheet and inventories the cleanup work remaining.
+Convert a MIDI file to a LilyPond `.ly` score with the cleanest possible output, and write a companion metadata file that records how the sheet was produced and objective metrics about the output.
 
-## Step 1 — Ask diagnostic questions
+## Step 1 — Check for an existing metadata file
 
-Before running anything, ask the user these questions (you can bundle them in one message):
+Before asking any questions, check whether a `.md` companion file already exists next to the `.ly` or `.mid` file. If it does, read it to extract any answers already present (title, MIDI description, tempo, time signature, etc.).
+
+Then ask only the questions that remain unanswered:
 
 1. **Smallest note value** — Are there 32nd notes, or is 16ths the finest detail? (affects `-d`/`-s` grid)
 2. **Swing / triplets** — Does the piece use triplets or swung 8ths? (determines `--allow-tuplet` flags)
 3. **MIDI origin** — Is this a perfectly-quantized MIDI (game, DAW sequencer) or recorded/humanized playing?
 4. **How many tracks** — Is this a single melody line or a multi-track arrangement?
 
-Skip any question the user has already answered in context.
+Skip any question the user has already answered in context or that the existing metadata file already covers.
 
 ## Step 2 — Choose parameters
 
@@ -74,33 +76,70 @@ Then compile to verify. **`cd` into the file's folder first** so that LilyPond d
 cd "path/to/folder" && lilypond "Song Name - midi2ly.ly" 2>&1 | grep -E "bar|error|warning"
 ```
 
-## Step 4 — Collect quality metrics
+## Step 4 — Compute quantitative metrics
 
-Run these commands to gather the numbers needed for the metadata file:
+Run the following Python snippet against the `.ly` file. It produces the numbers needed for the metadata file. No qualitative judgement here — just counts.
 
 ```bash
-# Count remaining fractional duration artifacts (goal: < 15)
-grep -oE '[0-9]+\*[0-9]+(/[0-9]+)?' output.ly | grep -v '\\skip' | wc -l
+python3 - <<'EOF'
+import re, os, sys
 
-# Count lines and file size
-wc -l output.ly
-du -h output.ly
+path = "path/to/Song Name - midi2ly.ly"
+with open(path) as f:
+    content = f.read()
 
-# Show remaining artifacts in musical voices (not \skip lines)
-grep -n '\*' output.ly | grep -v '\\skip'
+lines = content.count("\n")
+size  = os.path.getsize(path)
 
-# Extract key, time signature, tempo
-grep -n '\\key\|\\time\|\\tempo' output.ly | head -20
+# Measure count: highest % N comment
+measures = max((int(m) for m in re.findall(r'% (\d+)', content)), default=0)
 
-# List track names
-grep -n '^trackA\|^trackB\|^trackC\|^trackD' output.ly | grep -v 'channel'
+# Voice blocks
+voice_blocks = list(re.finditer(r'^(\w+) =.*?(?=^\w+ =|\Z)', content, re.MULTILINE | re.DOTALL))
+
+print(f"lines={lines}  size={size}B  measures={measures}  voices={len(voice_blocks)}")
+print()
+
+for m in voice_blocks:
+    name  = m.group(0).split()[0]
+    block = m.group(0)
+    notes   = len(re.findall(r'\b[a-g](is|es)?\b', block))
+    rests   = len(re.findall(r'\br[0-9]', block))
+    spacers = len(re.findall(r'\bs[0-9]+', block))
+    tempos  = len(re.findall(r'\\tempo', block))
+    clefs   = len(re.findall(r'\\clef', block))
+    tuplets = len(re.findall(r'\\times', block))
+    ghost   = "GHOST?" if measures > 0 and notes / measures < 0.10 else ""
+    print(f"  {name}: notes={notes} rests={rests} spacers={spacers} tempos={tempos} clefs={clefs} tuplets={tuplets} {ghost}")
+
+print()
+total_tempo   = len(re.findall(r'\\tempo', content))
+unique_tempo  = len(set(re.findall(r'\\tempo\s+\d+=(\d+)', content)))
+total_clef    = len(re.findall(r'\\clef', content))
+spacer_total  = len(re.findall(r'\bs[0-9]+', content))
+spacer_frac   = len(re.findall(r's[0-9]+\*[0-9]+/[0-9]+', content))
+change_staff  = len(re.findall(r'\\change\s+Staff', content))
+bar_checks    = len(re.findall(r'\\barNumberCheck', content))
+stem_dirs     = len(re.findall(r'\\stem(Up|Down)', content))
+omits         = len(re.findall(r'\\omit', content))
+
+print(f"tempo_events={total_tempo}  unique_tempos={unique_tempo}")
+print(f"clef_switches={total_clef}")
+print(f"spacer_tokens={spacer_total}  spacer_fractional={spacer_frac}")
+print(f"change_staff={change_staff}  bar_checks={bar_checks}  stem_dirs={stem_dirs}  omits={omits}")
+EOF
 ```
 
-## Step 5 — Write metadata file
+Record all printed values — you will paste them into the metadata file in Step 5.
 
-Write a companion `.md` file next to the `.ly` (same name, `.md` extension). It has two parts: a YAML front-matter block with facts about the sheet, and a markdown body with a conversion quality summary and a cleanup checklist.
+## Step 5 — Write or complete the metadata file
 
-Populate the fields by reading the `.ly` output. Infer `title` from the source filename. For `tracks`, list each `trackX` block name found in the file.
+A companion `.md` file lives next to the `.ly` (same stem, `.md` extension).
+
+- **If no file exists**: create it in full using the template below.
+- **If a file already exists**: add or replace only the sections that are missing or incomplete. Preserve any existing prose (`## MIDI file description`, `## Midi to Lilypond conversion`, etc.) verbatim.
+
+In both cases, ensure the front matter and the `## Quantitative analysis` section are present and up to date.
 
 ```markdown
 ---
@@ -110,37 +149,53 @@ lily_file: <stem - midi2ly.ly>
 compiled_pdf: <stem - midi2ly.pdf>
 key: <value from first \key directive, e.g. "c major">
 time: <value from \time directive, e.g. "4/4">
-tempo: <first \tempo value in BPM>
-tracks: [<list of track block names found in the .ly>]
+tempo_first: <first \tempo value in BPM>
+voices: [<list of voice block names found in the .ly>]
+conversion_tool: midi2ly
 quantization: -d <GRID> -s <GRID>
+tuplet_flags: <flags used, or "none">
 ---
 
 ## Score description
 
 <One short paragraph: what the piece is, how many voices/tracks, general character. Infer from the filename and track structure — do not invent musical details you cannot see in the file.>
 
-## Conversion quality
+## Quantitative analysis
+
+### File
 
 | Metric | Value |
 |---|---|
 | Lines | N |
-| File size | N KB |
-| Fractional `x*y` patterns in voices | N |
-| Bar check failures | N |
+| File size | N bytes |
+| Measures | N |
+| Voices | N |
 
-## Cleanup needed
+### Per-voice breakdown
 
-<For each issue found, add a checklist item. Use the known patterns below as a guide. Leave the list empty if none are found. Items here are rough — a plan-cleanup pass will add precise line numbers.>
+| Voice | Notes | Rests | Spacers | Tempo events | Clef switches | Tuplets |
+|---|---|---|---|---|---|---|
+| <name> | N | N | N | N | N | N |
 
-- [ ] <issue description>
+### Noise metrics
+
+| Metric | Value |
+|---|---|
+| Total `\tempo` events | N |
+| Unique tempo values | N |
+| Total `\clef` switches | N |
+| Spacer rest tokens | N |
+| Spacer rests with fractional multipliers | N |
+| Cross-staff `\change Staff` events | N |
+| `\barNumberCheck` assertions | N |
+| Explicit stem direction directives | N |
+| `\omit` directives | N |
+
+### Ghost voice signals (notes ÷ measures < 10%)
+
+| Voice | Notes | Measures | Ratio |
+|---|---|---|---|
+| <name> | N | N | N% |
 ```
 
-### Known cleanup patterns to check for
-
-Scan the `.ly` output for these and add a checklist item for each one found:
-
-- **Tempo spam** — Multiple `\tempo` events within a few measures (ritardando artifact). Note how many were found. Fix: keep only the first `\tempo` directive.
-- **Ghost voice** — A track block that is almost entirely rests with 1–2 stray notes. Fix: drop the entire block.
-- **Duplicate key/time signatures** — `\key` or `\time` appearing more than once at the top of a voice. Fix: strip the duplicate.
-- **Conductor track** — A track block containing only `\skip` and `\tempo` events, no notes. Fix: strip the whole block.
-- **Remaining `x*y` patterns in voices** — Non-standard duration ratios left after quantization. List the count. Fix: resolve each to standard notation.
+Leave the ghost voice table empty (header only) if no voices fall below the 10% threshold.

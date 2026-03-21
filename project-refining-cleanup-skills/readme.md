@@ -1,4 +1,4 @@
-# POC 04 - LLM Cleanup and Iteration
+# Project - Refining cleanup skills
 
 ## Question
 
@@ -20,5 +20,4 @@ The target interaction model is **one-shot cleanup**: given a messy LilyPond fil
 ## Success criteria
 
 - Output LilyPond compiles and renders a score that a musician would recognize as correct
-- The LLM can apply at least one non-trivial arrangement change on request
 - The round-trip (messy MIDI → LilyPond → LLM → clean score) produces something a musician could use as a starting point
